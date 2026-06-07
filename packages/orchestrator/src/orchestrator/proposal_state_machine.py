@@ -10,25 +10,23 @@ speak from dynamically assigned roles (CEO, CTO, Investor, Customer, etc.),
 respond to each other across rounds, and a Meta-LLM synthesizes the final report.
 
 The report is uploaded to IPFS and its hash anchored on Monad.
+All proposal state (roles, bids, messages, status) is stored on-chain via
+ChainEventStore — no SQLite or SQLAlchemy in this track.
 """
 import asyncio
 import hashlib
 import json
 import logging
-from datetime import datetime
+import re
 from typing import Optional
 
 import anthropic
 import redis.asyncio as aioredis
-from sqlalchemy import select, update
 
+from .chain_store import ChainEventStore, get_store
 from .config import settings
-from .database import db_session
 from .ipfs_client import upload_text, ipfs_url
-from .models import (
-    Agent, DiscussionMessage, Proposal, ProposalBid,
-    ProposalRole, ProposalStatus,
-)
+from .vector_store import VectorStore, get_vector_store
 from .websocket_manager import WebSocketManager
 
 logger = logging.getLogger("orchestrator.proposal")
@@ -109,71 +107,68 @@ class ProposalStateMachine:
             await self._run(proposal_id)
         except Exception as e:
             logger.error(f"[PROPOSAL] Fatal error for {proposal_id}: {e}", exc_info=True)
-            await self._transition(proposal_id, ProposalStatus.FAILED)
+            await self._transition(proposal_id, "FAILED")
 
     # ── Main lifecycle ─────────────────────────────────────────────────────────
 
     async def _run(self, proposal_id: str) -> None:
-        proposal = await self._get(proposal_id)
+        store = get_store()
+        vstore = get_vector_store()
+
+        proposal = await store.get_proposal(proposal_id)
         if not proposal:
             logger.error(f"[PROPOSAL] Not found: {proposal_id}")
             return
 
-        await self._log(f"[PROPOSAL] Starting #{proposal_id[:8]}... — {proposal.title[:60]}")
+        await self._log(f"[PROPOSAL] Starting #{proposal_id[:8]}... — {proposal['title'][:60]}")
 
         # ── ROLE DISCOVERY ────────────────────────────────────────────────────
-        await self._transition(proposal_id, ProposalStatus.ROLE_DISCOVERY)
+        await self._transition(proposal_id, "ROLE_DISCOVERY")
         roles = await self._discover_roles(proposal)
         if not roles:
             await self._log(f"[PROPOSAL] Role discovery failed for #{proposal_id[:8]}")
-            await self._transition(proposal_id, ProposalStatus.FAILED)
+            await self._transition(proposal_id, "FAILED")
             return
 
-        await self._save_roles(proposal_id, roles)
+        await store.announce_roles(proposal_id, roles)
+        await store.wait_blocks(2)
         await self._log(f"[PROPOSAL] Roles: {', '.join(r['name'] for r in roles)}")
 
         # ── BIDDING ───────────────────────────────────────────────────────────
-        await self._transition(proposal_id, ProposalStatus.BIDDING)
+        await self._transition(proposal_id, "BIDDING")
         await self._broadcast_bid_request(proposal, roles)
         await asyncio.sleep(settings.PROPOSAL_BIDDING_TIMEOUT)
 
         # ── TEAM FORMATION ────────────────────────────────────────────────────
-        team = await self._form_team(proposal_id, roles)
+        team = await self._form_team(proposal_id, roles, store)
         if not team:
             await self._log(f"[PROPOSAL] No bids received — FAILED #{proposal_id[:8]}")
-            await self._transition(proposal_id, ProposalStatus.FAILED)
-            if self.chain and settings.proposal_contracts_deployed and proposal.chain_proposal_id:
+            await self._transition(proposal_id, "FAILED")
+            chain_id = proposal.get("chain_proposal_id")
+            if self.chain and settings.proposal_contracts_deployed and chain_id:
                 try:
-                    await self.chain.fail_proposal(proposal.chain_proposal_id, "No bids")
+                    await self.chain.fail_proposal(chain_id, "No bids")
                 except Exception:
                     pass
             return
 
-        await self._transition(proposal_id, ProposalStatus.TEAM_FORMED)
+        await self._transition(proposal_id, "TEAM_FORMED")
         team_str = ", ".join(f"{r}({a[:8]}...)" for r, a in team.items())
         await self._log(f"[PROPOSAL] Team: {team_str}")
 
-        # Record on-chain
-        if self.chain and settings.proposal_contracts_deployed and proposal.chain_proposal_id:
-            try:
-                agents = list(team.values())
-                roles_list = list(team.keys())
-                await self.chain.form_proposal_team(
-                    proposal.chain_proposal_id, agents, roles_list
-                )
-            except Exception as e:
-                logger.warning(f"[CHAIN] form_proposal_team failed: {e}")
+        # Record team on-chain via ChainEventStore
+        await store.form_team_on_chain(proposal_id, team)
 
         # ── DISCUSSION ────────────────────────────────────────────────────────
-        await self._transition(proposal_id, ProposalStatus.DISCUSSING)
-        await self._run_discussion(proposal_id, proposal, team, roles)
+        await self._transition(proposal_id, "DISCUSSING")
+        await self._run_discussion(proposal_id, proposal, team, roles, store, vstore)
 
         # ── SYNTHESIS ────────────────────────────────────────────────────────
-        await self._transition(proposal_id, ProposalStatus.SYNTHESIZING)
-        report = await self._synthesize(proposal_id, proposal, team, roles)
+        await self._transition(proposal_id, "SYNTHESIZING")
+        report = await self._synthesize(proposal_id, proposal, team, roles, store, vstore)
         if not report:
             await self._log(f"[PROPOSAL] Synthesis failed — FAILED #{proposal_id[:8]}")
-            await self._transition(proposal_id, ProposalStatus.FAILED)
+            await self._transition(proposal_id, "FAILED")
             return
 
         # Upload to IPFS
@@ -181,63 +176,35 @@ class ProposalStateMachine:
         ipfs_cid = await upload_text(report, name=f"mindmesh-{proposal_id[:8]}.md")
         report_hash = "0x" + hashlib.sha256(report.encode()).hexdigest()
 
-        async with db_session() as session:
-            await session.execute(
-                update(Proposal)
-                .where(Proposal.id == proposal_id)
-                .values(
-                    final_report=report,
-                    report_ipfs_hash=ipfs_cid,
-                    report_hash=report_hash,
-                )
-            )
-
+        await store.save_report(proposal_id, report, ipfs_cid, report_hash)
         await self._log(f"[IPFS] Report CID: {ipfs_cid}")
         await self._log(f"[PROPOSAL] Report hash: {report_hash[:18]}...")
 
         # Settle on-chain
-        tx_hash = "0x" + "0" * 64
-        if self.chain and settings.proposal_contracts_deployed and proposal.chain_proposal_id:
-            try:
-                agents = list(team.values())
-                equal_share = 10000 // len(agents)
-                shares = [equal_share] * len(agents)
-                shares[-1] += 10000 - sum(shares)  # remainder to last
-                tx_hash = await self.chain.settle_proposal(
-                    proposal.chain_proposal_id,
-                    report_hash,
-                    ipfs_cid,
-                    agents,
-                    shares,
-                )
-                await self._log(f"[CHAIN] Proposal settled: {tx_hash}")
-            except Exception as e:
-                logger.warning(f"[CHAIN] settle_proposal failed: {e}")
+        agents = list(team.values())
+        equal_share = 10000 // len(agents)
+        shares = [equal_share] * len(agents)
+        shares[-1] += 10000 - sum(shares)  # remainder to last
 
-        async with db_session() as session:
-            await session.execute(
-                update(Proposal)
-                .where(Proposal.id == proposal_id)
-                .values(tx_hash=tx_hash)
-            )
+        tx_hash = await store.settle_on_chain(
+            proposal_id, report_hash, ipfs_cid, agents, shares
+        )
+        await self._log(f"[CHAIN] Proposal settled: {tx_hash}")
 
-        # Update agent reputation in local DB
-        await self._update_reputation(team)
-
-        await self._transition(proposal_id, ProposalStatus.SETTLED)
+        await self._transition(proposal_id, "SETTLED")
         await self._log(
-            f"[PROPOSAL] ✓ SETTLED #{proposal_id[:8]}... | "
+            f"[PROPOSAL] SETTLED #{proposal_id[:8]}... | "
             f"IPFS: {ipfs_cid[:20]}... | "
             f"Agents: {len(team)}"
         )
 
     # ── Role Discovery ────────────────────────────────────────────────────────
 
-    async def _discover_roles(self, proposal: Proposal) -> list[dict]:
+    async def _discover_roles(self, proposal: dict) -> list[dict]:
         prompt = (
-            f"Proposal title: {proposal.title}\n\n"
-            f"Description: {proposal.description}\n\n"
-            f"Required roles count: {proposal.max_roles} (exactly this many roles)\n\n"
+            f"Proposal title: {proposal['title']}\n\n"
+            f"Description: {proposal['description']}\n\n"
+            f"Required roles count: {proposal['max_roles']} (exactly this many roles)\n\n"
             "List the exact expert roles needed to evaluate this proposal."
         )
         try:
@@ -248,51 +215,25 @@ class ProposalStateMachine:
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = msg.content[0].text.strip()
-            # Strip markdown if present
-            import re
             raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
             roles = json.loads(raw)
-            # Cap to max_roles
-            roles = roles[: min(proposal.max_roles, settings.PROPOSAL_MAX_ROLES)]
+            roles = roles[: min(proposal["max_roles"], settings.PROPOSAL_MAX_ROLES)]
             return roles
         except Exception as e:
             logger.error(f"[PROPOSAL] Role discovery error: {e}", exc_info=True)
             return []
 
-    async def _save_roles(self, proposal_id: str, roles: list[dict]) -> None:
-        async with db_session() as session:
-            # Clear any existing roles
-            existing = await session.execute(
-                select(ProposalRole).where(ProposalRole.proposal_id == proposal_id)
-            )
-            for r in existing.scalars().all():
-                await session.delete(r)
-            # Save roles
-            for role in roles:
-                pr = ProposalRole(
-                    proposal_id=proposal_id,
-                    role_name=role["name"],
-                    role_description=role.get("description", ""),
-                )
-                session.add(pr)
-            # Save decided roles in proposal JSON column
-            await session.execute(
-                update(Proposal)
-                .where(Proposal.id == proposal_id)
-                .values(roles_decided=roles)
-            )
-
     # ── Bidding ───────────────────────────────────────────────────────────────
 
-    async def _broadcast_bid_request(self, proposal: Proposal, roles: list[dict]) -> None:
+    async def _broadcast_bid_request(self, proposal: dict, roles: list[dict]) -> None:
         payload = json.dumps({
             "type": "proposal_bid_request",
-            "proposal_id": proposal.id,
-            "title": proposal.title,
-            "description": proposal.description,
-            "domain": proposal.domain,
+            "proposal_id": proposal["id"],
+            "title": proposal["title"],
+            "description": proposal["description"],
+            "domain": proposal.get("domain", ""),
             "roles": roles,
-            "bounty": proposal.bounty,
+            "bounty": proposal.get("bounty", "0"),
         })
         try:
             await self.redis.publish("proposals:broadcast", payload)
@@ -303,58 +244,35 @@ class ProposalStateMachine:
         except Exception as e:
             logger.warning(f"[PROPOSAL] Broadcast failed: {e}")
 
-    async def _form_team(self, proposal_id: str, roles: list[dict]) -> dict[str, str]:
+    async def _form_team(
+        self, proposal_id: str, roles: list[dict], store: ChainEventStore
+    ) -> dict[str, str]:
         """
         Assign best-fit agent per role from received bids.
         Returns {role_name: agent_address} dict.
         """
-        async with db_session() as session:
-            result = await session.execute(
-                select(ProposalBid)
-                .where(ProposalBid.proposal_id == proposal_id)
-                .order_by(ProposalBid.fit_score.desc())
-            )
-            bids = result.scalars().all()
-
+        bids = await store.get_bids(proposal_id)
         if not bids:
             return {}
 
         role_names = [r["name"] for r in roles]
-        team: dict[str, str] = {}          # role_name → agent_address
-        assigned_agents: set[str] = set()  # prevent double-assignment
+        team: dict[str, str] = {}
+        assigned_agents: set[str] = set()
 
         # Greedy: for each role, pick highest-score unassigned agent
         for role_name in role_names:
-            role_bids = [b for b in bids if b.role_name == role_name]
-            role_bids.sort(key=lambda b: b.fit_score, reverse=True)
+            role_bids = [b for b in bids if b["role_name"] == role_name]
+            role_bids.sort(key=lambda b: b["fit_score"], reverse=True)
             for bid in role_bids:
-                if bid.agent_address not in assigned_agents:
-                    team[role_name] = bid.agent_address
-                    assigned_agents.add(bid.agent_address)
+                if bid["agent_address"] not in assigned_agents:
+                    team[role_name] = bid["agent_address"]
+                    assigned_agents.add(bid["agent_address"])
+                    # Record assignment in store
+                    await store.assign_role(
+                        proposal_id, role_name,
+                        bid["agent_address"], bid.get("agent_name", "")
+                    )
                     break
-
-        if not team:
-            return {}
-
-        # Persist assignments
-        async with db_session() as session:
-            now = datetime.utcnow()
-            for role_name, agent_addr in team.items():
-                # Find agent name
-                agent = await session.get(Agent, agent_addr)
-                agent_name = agent.name if agent else agent_addr[:10]
-                await session.execute(
-                    update(ProposalRole)
-                    .where(
-                        ProposalRole.proposal_id == proposal_id,
-                        ProposalRole.role_name == role_name,
-                    )
-                    .values(
-                        agent_address=agent_addr,
-                        agent_name=agent_name,
-                        assigned_at=now,
-                    )
-                )
 
         return team
 
@@ -363,9 +281,11 @@ class ProposalStateMachine:
     async def _run_discussion(
         self,
         proposal_id: str,
-        proposal: Proposal,
+        proposal: dict,
         team: dict[str, str],
         roles: list[dict],
+        store: ChainEventStore,
+        vstore: VectorStore,
     ) -> None:
         role_desc_map = {r["name"]: r.get("description", "") for r in roles}
         total_rounds = settings.PROPOSAL_DISCUSSION_ROUNDS
@@ -379,13 +299,7 @@ class ProposalStateMachine:
             )
 
             # Fetch all previous messages for context
-            async with db_session() as session:
-                result = await session.execute(
-                    select(DiscussionMessage)
-                    .where(DiscussionMessage.proposal_id == proposal_id)
-                    .order_by(DiscussionMessage.created_at)
-                )
-                prev_messages = result.scalars().all()
+            prev_messages = await store.get_messages(proposal_id)
 
             # Broadcast round start to agents
             await self.redis.publish(
@@ -399,10 +313,10 @@ class ProposalStateMachine:
                     "team": {r: a for r, a in team.items()},
                     "previous_messages": [
                         {
-                            "role_name": m.role_name,
-                            "agent_name": m.agent_name,
-                            "round_num": m.round_num,
-                            "content": m.content,
+                            "role_name": m["role_name"],
+                            "agent_name": m["agent_name"],
+                            "round_num": m["round_num"],
+                            "content": m["content"],
                         }
                         for m in prev_messages
                     ],
@@ -412,17 +326,10 @@ class ProposalStateMachine:
             # Wait for agents to respond
             await asyncio.sleep(settings.PROPOSAL_DISCUSSION_TIMEOUT)
 
-            # Check who responded; for missing roles, generate backup via LLM
-            async with db_session() as session:
-                result = await session.execute(
-                    select(DiscussionMessage).where(
-                        DiscussionMessage.proposal_id == proposal_id,
-                        DiscussionMessage.round_num == round_num,
-                    )
-                )
-                round_messages = result.scalars().all()
-
-            responded_roles = {m.role_name for m in round_messages}
+            # Check who responded; generate backup for missing roles via LLM
+            all_messages = await store.get_messages(proposal_id)
+            round_messages = [m for m in all_messages if m["round_num"] == round_num]
+            responded_roles = {m["role_name"] for m in round_messages}
             missing_roles = set(team.keys()) - responded_roles
 
             if missing_roles:
@@ -431,18 +338,21 @@ class ProposalStateMachine:
                 )
                 await self._generate_backup_messages(
                     proposal_id, proposal, team, role_desc_map,
-                    round_num, round_type, total_rounds, prev_messages, missing_roles
+                    round_num, round_type, total_rounds,
+                    prev_messages, missing_roles, store, vstore
                 )
 
             count = len(responded_roles) + len(missing_roles)
             await self._log(
                 f"[DISCUSSION] Round {round_num} complete — {count} message(s)"
             )
+            # Wait for on-chain confirmations before proceeding to next round
+            await store.wait_blocks(2)
 
     async def _generate_backup_messages(
         self,
         proposal_id: str,
-        proposal: Proposal,
+        proposal: dict,
         team: dict[str, str],
         role_desc_map: dict[str, str],
         round_num: int,
@@ -450,18 +360,18 @@ class ProposalStateMachine:
         total_rounds: int,
         prev_messages: list,
         missing_roles: set[str],
+        store: ChainEventStore,
+        vstore: VectorStore,
     ) -> None:
         """Generate discussion messages via LLM for roles whose agents didn't respond."""
         prev_text = "\n\n".join(
-            f"[Round {m.round_num} — {m.role_name}]: {m.content}"
+            f"[Round {m['round_num']} — {m['role_name']}]: {m['content']}"
             for m in prev_messages
         )
 
         async def _gen_one(role_name: str) -> None:
-            agent_addr = team.get(role_name, "unknown")
-            async with db_session() as session:
-                agent = await session.get(Agent, agent_addr)
-            agent_name = agent.name if agent else "AI Agent"
+            agent_addr = team.get(role_name, "0x0000000000000000000000000000000000000000")
+            agent_name = "AI Agent"
 
             system = DISCUSSION_SYSTEM_TEMPLATE.format(
                 agent_name=agent_name,
@@ -472,8 +382,8 @@ class ProposalStateMachine:
                 round_type=round_type,
             )
             user_prompt = (
-                f"Proposal: {proposal.title}\n\n"
-                f"{proposal.description}\n\n"
+                f"Proposal: {proposal['title']}\n\n"
+                f"{proposal['description']}\n\n"
                 + (f"Previous discussion:\n{prev_text}" if prev_text else "(No prior discussion)")
                 + f"\n\nAs {role_name}, give your {round_type} perspective now."
             )
@@ -490,17 +400,24 @@ class ProposalStateMachine:
                 logger.warning(f"[DISCUSSION] Backup generation failed for {role_name}: {e}")
                 content = f"[{role_name} perspective unavailable]"
 
-            async with db_session() as session:
-                dm = DiscussionMessage(
-                    proposal_id=proposal_id,
-                    agent_address=agent_addr,
-                    agent_name=agent_name,
-                    role_name=role_name,
-                    round_num=round_num,
-                    round_type=round_type,
-                    content=content,
-                )
-                session.add(dm)
+            msg_id = await store.post_message(
+                proposal_id=proposal_id,
+                round_num=round_num,
+                round_type=round_type,
+                agent_address=agent_addr,
+                agent_name=agent_name,
+                role_name=role_name,
+                content=content,
+            )
+            vstore.add_message(
+                proposal_id=proposal_id,
+                msg_id=msg_id,
+                content=content,
+                agent_name=agent_name,
+                role_name=role_name,
+                round_num=round_num,
+                round_type=round_type,
+            )
 
         await asyncio.gather(*[_gen_one(r) for r in missing_roles], return_exceptions=True)
 
@@ -509,34 +426,37 @@ class ProposalStateMachine:
     async def _synthesize(
         self,
         proposal_id: str,
-        proposal: Proposal,
+        proposal: dict,
         team: dict[str, str],
         roles: list[dict],
+        store: ChainEventStore,
+        vstore: VectorStore,
     ) -> Optional[str]:
-        async with db_session() as session:
-            result = await session.execute(
-                select(DiscussionMessage)
-                .where(DiscussionMessage.proposal_id == proposal_id)
-                .order_by(DiscussionMessage.round_num, DiscussionMessage.created_at)
-            )
-            messages = result.scalars().all()
-
+        messages = await store.get_messages(proposal_id)
         if not messages:
             return None
+
+        # RAG: pull relevant context via vector search
+        rag_context = vstore.get_context(
+            proposal_id,
+            query=proposal["title"] + " " + proposal["description"][:200],
+            n=8,
+        )
 
         discussion_text = ""
         current_round = 0
         for m in messages:
-            if m.round_num != current_round:
-                current_round = m.round_num
+            if m["round_num"] != current_round:
+                current_round = m["round_num"]
                 round_labels = {1: "INITIAL PERSPECTIVES", 2: "RESPONSES", 3: "FINAL RECOMMENDATIONS"}
-                discussion_text += f"\n\n--- ROUND {m.round_num}: {round_labels.get(m.round_num, '')} ---\n"
-            discussion_text += f"\n**{m.role_name}** ({m.agent_name}):\n{m.content}\n"
+                discussion_text += f"\n\n--- ROUND {m['round_num']}: {round_labels.get(m['round_num'], '')} ---\n"
+            discussion_text += f"\n**{m['role_name']}** ({m['agent_name']}):\n{m['content']}\n"
 
         user_prompt = (
-            f"# Proposal: {proposal.title}\n\n"
-            f"## Description\n{proposal.description}\n\n"
-            f"## Panel Discussion\n{discussion_text}\n\n"
+            f"# Proposal: {proposal['title']}\n\n"
+            f"## Description\n{proposal['description']}\n\n"
+            + (f"{rag_context}\n\n" if rag_context else "")
+            + f"## Panel Discussion\n{discussion_text}\n\n"
             "Generate the complete analysis report now."
         )
 
@@ -555,38 +475,12 @@ class ProposalStateMachine:
             logger.error(f"[SYNTHESIS] Failed: {e}", exc_info=True)
             return None
 
-    # ── Reputation ────────────────────────────────────────────────────────────
-
-    async def _update_reputation(self, team: dict[str, str]) -> None:
-        async with db_session() as session:
-            for role_name, agent_addr in team.items():
-                await session.execute(
-                    update(Agent)
-                    .where(Agent.address == agent_addr)
-                    .values(
-                        wins=Agent.wins + 1,
-                        reputation=Agent.reputation + 150,
-                    )
-                )
-                await self._log(f"[REP] {agent_addr[:10]}... +150 rep (proposal contribution)")
-
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    async def _transition(self, proposal_id: str, status: ProposalStatus) -> None:
-        async with db_session() as session:
-            await session.execute(
-                update(Proposal)
-                .where(Proposal.id == proposal_id)
-                .values(status=status, updated_at=datetime.utcnow())
-            )
-        await self.ws.broadcast_status(proposal_id, status.value)
-
-    async def _get(self, proposal_id: str) -> Optional[Proposal]:
-        async with db_session() as session:
-            result = await session.execute(
-                select(Proposal).where(Proposal.id == proposal_id)
-            )
-            return result.scalar_one_or_none()
+    async def _transition(self, proposal_id: str, status: str) -> None:
+        store = get_store()
+        await store.set_status(proposal_id, status)
+        await self.ws.broadcast_status(proposal_id, status)
 
     async def _log(self, message: str) -> None:
         logger.info(message)

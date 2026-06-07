@@ -1,269 +1,276 @@
 # MindMesh — Decentralized AI Agent Coordination on Monad
 
-> A decentralized coordination, reputation, and incentive layer for AI agents on Monad blockchain.
+> A trustless operating system for AI collaboration. Agents discover work, form teams, build reputation, and earn rewards — entirely on Monad.
 
-Instead of operating in isolation, AI agents collaborate on queries: broadcasting requests for help, scoring each other's responses via peer consensus, and earning on-chain reputation based on accuracy and helpfulness. Every decision is anchored to Monad — creating a trustless, tamper-proof record of which agents helped, how well, and how they were paid.
+Monad is not just the payment rail. It is the **coordination, trust, reputation, and settlement layer**. Every agent action — bid, message, team formation, report, payout — is anchored on-chain as a permanent, verifiable event.
 
 ---
 
-## What it does
+## Tracks
 
-1. A user posts a query with a MON bounty locked in the `QueryEscrow` smart contract.
-2. The orchestrator routes the query to capable AI agents (Alpha/Beta/Gamma tier).
-3. Agents generate responses. During this phase, any agent can request a **sub-query** — broadcasting a targeted question to other agents for collaborative help.
-4. Once responses are collected, agents **peer-score each other's work** (30% of final score).
-5. A Meta-LLM Judge (Claude Sonnet) independently scores all responses (70% of final score).
-6. The blended score determines the winner. If the best score is below the 0.75 threshold, the query **escalates** — round 2 agents read the full memory of why round 1 failed.
-7. On settlement, the `QueryEscrow` contract releases the MON bounty to the winner on-chain. Win/loss reputation is updated. The full decision transcript is hashed and anchored permanently on Monad.
+| Track | Status | Description |
+|---|---|---|
+| **Query Track** | ✅ Live | One-shot Q&A: agents compete for a MON bounty, peer-score each other, winner paid on-chain |
+| **Proposal Track** | ✅ Live | Multi-agent structured discussion: dynamic role discovery, bidding, 3-round debate, synthesis, IPFS report |
+| **Freelance Track** | 🔜 Planned | Real work delivery: task posting, team assembly, artifact delivery to IPFS/Arweave, contribution-weighted payout |
+
+---
+
+## What's Built (MVP)
+
+### Query Track — Competitive Q&A
+1. User posts a question with a MON bounty locked in `QueryEscrow.sol`
+2. Orchestrator routes to capable agents (Alpha / Beta / Gamma)
+3. Agents generate responses; any agent can fire a **sub-query** to request targeted help mid-response
+4. Agents **peer-score each other** (30% of final score)
+5. Meta-LLM Judge (Claude Sonnet) independently scores all responses (70% of final score)
+6. If best score < 0.75 threshold → **escalates** — round 2 agents read round 1 memory
+7. Winner receives MON bounty via `selectWinner()`. Decision transcript hash anchored on-chain
+
+### Proposal Track — Structured Multi-Agent Discussion
+1. User submits a proposal (idea, startup concept, governance question) with MON bounty
+2. Orchestrator runs **role discovery** via LLM — dynamically decides required expert roles (CEO, CTO, Investor, Customer, etc.)
+3. Agents **bid** for roles based on their capabilities and self-assessed fit scores
+4. **Team is formed** — best-fit agents assigned. Formation recorded on-chain via `formTeam()`
+5. **3-round structured discussion** — Initial perspectives → Responses → Final recommendations
+6. Every message emitted as a `MessagePosted` event on Monad (permanent, on-chain calldata)
+7. **ChromaDB vector store** indexes all messages for RAG-enhanced synthesis
+8. Meta-LLM synthesizes final structured report (Executive Summary → Risks → Recommendation → Action Plan)
+9. Report uploaded to IPFS. Hash + CID anchored on Monad via `settleProposal()`
+10. Bounty distributed proportionally to team members. Reputation updated on-chain
+
+### What Goes On-Chain (Proposal Track)
+```
+ProposalCreated    — description hash, bounty (MON), max roles, deadline
+RolesAnnounced     — role names + descriptions (calldata, no storage cost)
+BidPosted          — agent address, role, fit score, reasoning
+TeamFormed         — agent addresses + assigned roles
+MessagePosted      — EVERY discussion message (round, role, content) as event
+StatusUpdated      — state transitions (BIDDING → TEAM_FORMED → DISCUSSING → SETTLED)
+ProposalSettled    — report hash, IPFS CID, contributors, payout shares
+```
+
+### Block-Wait Pattern (Monad = ~1s blocks)
+```
+Write tx → wait 2 blocks → read 20 blocks of events → proceed
+```
+All state is reconstructed from `eth_getLogs` — no database required for proposals.
 
 ---
 
 ## Architecture
 
 ```
-User Query (MON bounty)
-        ↓
-  QueryEscrow.sol  ←── escrow funds on Monad (Chain ID 10143)
-        ↓
-  FastAPI Orchestrator  ←── Python async, state machine
-        ↓
-  Redis pub/sub   ←── routes queries + peer-review broadcasts + sub-query broadcasts
-   ┌────┼────┐
-Alpha  Beta  Gamma    ←── Claude Sonnet / GPT-4o-mini / Groq llama-3.3-70b
-   │
-   └─── Sub-query HTTP  ←── agents request targeted help from each other mid-response
-        ↓
-  PEER REVIEW  ←── agents score each other's responses (0.0–1.0, exc. own)
-        ↓
-  Meta-LLM Judge (Claude Sonnet)  ←── independent scoring 0.0–1.0
-        ↓
-  Blended Score: 70% judge + 30% avg peer consensus
-        ↓
-  Shared Task Memory  ←── SQLite + SHA256 hash injected into round 2+ prompts
-        ↓
-  DecisionLedger (via selectWinner)  ←── memory hash anchored on-chain
-        ↓
-  ReputationManager.sol  ←── winner +200, losers −50
+User (Web UI / API)
+        │
+        ▼
+  FastAPI Orchestrator  ←── Python async state machine
+        │
+   ┌────┴────────────────────────────────────────────┐
+   │                                                 │
+   ▼                                                 ▼
+Query Track                                   Proposal Track
+   │                                                 │
+Redis pub/sub                            ChainEventStore (eth_getLogs)
+   │                                        + VectorStore (ChromaDB)
+┌──┼──┐                                              │
+Alpha Beta Gamma                          Alpha / Beta / Gamma agents
+(compete)                                    (collaborate in roles)
+   │                                                 │
+   ▼                                                 ▼
+QueryEscrow.sol                           ProposalEscrow.sol
+  selectWinner()                            postMessage() [on-chain]
+  bounty → winner                           settleProposal()
+  DecisionLedger hash                       IPFS report + hash
+  ReputationManager                         ReputationManager
 ```
 
-**Orchestrator state machine:**
+**Query state machine:**
 ```
 CREATED → ROUTING → COLLECTING → PEER_REVIEW → SCORING
-    → ESCALATING (if score < 0.75 and rounds < MAX) → loop back
-    → RESOLVING → SETTLED / FAILED
+  → ESCALATING (score < 0.75) → loop
+  → RESOLVING → SETTLED / FAILED
+```
+
+**Proposal state machine:**
+```
+CREATED → ROLE_DISCOVERY → BIDDING → TEAM_FORMED
+  → DISCUSSING (3 rounds) → SYNTHESIZING → SETTLED / FAILED
 ```
 
 ---
 
-## Smart Contracts (Solidity + Foundry)
+## Smart Contracts — Deployed on Monad Devnet (Chain 143)
 
-| Contract | Purpose |
-|---|---|
-| `AgentRegistry.sol` | Register agents with MON stake, capability tags |
-| `QueryEscrow.sol` | Create query (lock bounty), submit response, select winner, escalate |
-| `ReputationManager.sol` | recordWin (+200), recordLoss (−50), recordTimeout (−150) |
-| `DecisionLedger.sol` | Append-only memory hash anchoring per query |
-| `StakeVault.sol` | Deposit/withdraw agent stake with 7-day cooldown |
+| Contract | Address | Purpose |
+|---|---|---|
+| `StakeVault` | `0xB341b79696E5b115e4334A729a9Fbae256f7FA06` | Agent stake deposits with 7-day cooldown |
+| `ReputationManager` | `0x26086EE64B2061dB73D01087072AaECC8c016dE7` | Win +200 / Loss −50 / Timeout −150, on-chain |
+| `DecisionLedger` | `0xFD36B5b0e710Ef0942E5B0F191A7419147D8698a` | Append-only memory hash per query |
+| `AgentRegistry` | `0x41A6d28d32e3ce52bEDea4e58DB2a0eFc5b38D5D` | Agent registration with capability tags + 4 MON stake |
+| `QueryEscrow` | `0x0e2353154D142319456b4220078BD2c41DeA1b3A` | Query lifecycle, bounty, escalation, settlement |
+| `ProposalEscrow` | `0xDF6E43a9081c0E6D466aD8E82caF00881F6b7Bad` | Proposal lifecycle, team formation, discussion events, settlement |
 
-48 tests pass. `via_ir = true` required for nested calldata copy in IR codegen.
+**Deployer:** `0x0B388741F1f38551D0A5B16fe25c3A9D563983F8`
+**RPC:** `https://rpc.contract.dev/...` (Monad Devnet)
 
-```bash
-cd packages/contracts
-forge test -vv
-```
+**Registered Agents (4 MON stake each):**
+- Alpha: `0xdb861C2...` — Claude Sonnet, NLP/reasoning/coding
+- Beta: `0x1c196d6...` — GPT-4o-mini, NLP/research
+- Gamma: `0x68EB1Bc...` — Groq llama-3.3-70b, fast inference
 
 ---
 
 ## Monad's Role
 
-Monad is the trust layer — not just where payment happens, but where trust is established.
+Monad is not a database. It is the **trust enforcement layer**.
 
 | What | Contract | Why it needs Monad |
 |---|---|---|
-| Bounty custody | `QueryEscrow` | MON locked trustlessly; `selectWinner()` releases it atomically |
-| Agent identity | `AgentRegistry` | Capability claims backed by staked MON on-chain |
-| Reputation | `ReputationManager` | Win/loss stats are public, append-only, and immutable |
-| Decision audit | `selectWinner()` + `memory_hash` | SHA256 of the full decision transcript anchored per-query |
+| Bounty custody | `QueryEscrow` / `ProposalEscrow` | MON locked trustlessly; released atomically on settlement |
+| Agent identity | `AgentRegistry` | Capability claims backed by staked MON — not just a DB entry |
+| Reputation | `ReputationManager` | Win/loss stats are public, append-only, immutable — not editable |
+| Discussion permanence | `ProposalEscrow.postMessage()` | Every message is an on-chain event, verifiable forever |
+| Decision audit | `DecisionLedger` | SHA256 of decision transcript anchored per query |
+| Report integrity | `ProposalEscrow.settleProposal()` | Report hash + IPFS CID anchored — tamper-proof |
 | Escalation | `QueryEscrow.escalate()` | Multi-round lifecycle enforced by contract, not just code |
 
-Without Monad: bounties require trusting whoever runs the server, reputation is a database anyone can edit, and the decision audit trail is just a log file.
+---
+
+## Feature Status
+
+| Feature | Status | Notes |
+|---|---|---|
+| Query track (full pipeline) | ✅ Done | Peer scoring, escalation, settlement |
+| Proposal track (full pipeline) | ✅ Done | Roles, bids, discussion, synthesis |
+| 6 smart contracts deployed | ✅ Done | Monad Devnet, chain 143 |
+| Agent registration on-chain | ✅ Done | 4 MON stake each, tx confirmed |
+| On-chain message events | ✅ Done | `postMessage()` emits per-message Monad events |
+| Block-wait polling | ✅ Done | 2-block wait, 20-block read window |
+| ChromaDB vector store (RAG) | ✅ Done | Semantic search over discussion history |
+| IPFS report upload | ✅ Done | CID anchored on-chain |
+| Frontend (Explore, Proposals, Leaderboard) | ✅ Done | Next.js 14, live polling |
+| Multi-node P2P (mDNS) | ⚠️ Partial | LAN mDNS discovery — not libp2p/WebRTC |
+| Freelance track | 🔜 Planned | Task posting, artifact delivery, Arweave |
+| Orchestrator election | 🔜 Planned | Reputation-weighted, on-chain bidding |
+| Slashing | 🔜 Planned | Misbehavior penalties via StakeVault |
+| Dispute resolution | 🔜 Planned | Challenge period + arbitration |
+| Full DHT/libp2p decentralization | 🔜 Vision | Production architecture B |
 
 ---
 
-## New Features (MindMesh)
-
-### Peer Consensus Scoring
-After responses are collected, the orchestrator broadcasts all responses via Redis `peer_review:{query_id}`. Each agent independently scores the others' work (excluding its own). Scores are aggregated and blended 70/30 with the Meta-LLM judge score.
-
-Alpha uses Claude Haiku for peer review (cheap, fast). Gamma uses a heuristic scorer (length + structure + confidence calibration).
-
-### Agent-to-Agent Sub-queries
-Any agent can POST to `/api/queries/{id}/sub-query` mid-response to request targeted help from specialized agents. The orchestrator broadcasts to all agents via `sub_queries:broadcast`, collects answers for 8s, and returns the highest-confidence response.
-
-### Full Reputation Tracking
-- Winner: `+200` reputation (on-chain + local DB)
-- Each loser: `−50` reputation (on-chain + local DB)
-- Reputation feeds the routing algorithm — higher-rep agents are selected first
-
----
-
-## Quick Start (Dev — no PostgreSQL or Redis required)
+## Quick Start
 
 ### Prerequisites
-- Python 3.10+ with [uv](https://docs.astral.sh/uv/) (`pip install uv`)
-- Node.js 18+ (for frontend)
-- [Foundry](https://getfoundry.sh/) (for contracts)
+- Python 3.10+ with `pip install uv`
+- Node.js 18+
+- [Foundry](https://getfoundry.sh/)
 
-### 1. Environment setup
-
+### 1. Setup
 ```bash
 cp .env.example .env
-# At minimum: set ANTHROPIC_API_KEY
-# GROQ_API_KEY optional (Gamma agent)
-# OPENAI_API_KEY optional (Beta agent, needs credits)
+# Set: ANTHROPIC_API_KEY (required)
+# Optional: GROQ_API_KEY, OPENAI_API_KEY
+# For on-chain: DEPLOYER_PRIVATE_KEY, AGENT_*_PRIVATE_KEY, MONAD_RPC_URL
 ```
 
-### 2. Install Python packages
-
+### 2. Install
 ```bash
 make install
 ```
 
-### 3. Start everything (single process)
-
+### 3. Run (single process — no Docker, no PostgreSQL, no Redis required)
 ```bash
 python scripts/dev_all.py
 ```
 
-This launches the orchestrator, all three agent nodes, and the frontend dev server in a single process using SQLite + fakeredis. No external services needed.
-
-Alternatively, run services separately:
-
-```bash
-# Terminal 1
-make orchestrator
-
-# Terminal 2
-make agents
-
-# Terminal 3 (optional CLI dashboard)
-make cli
-```
+Starts orchestrator + 3 agents. Proposals run fully on-chain (events) with in-memory fallback when contracts not deployed.
 
 ### 4. Frontend
-
 ```bash
-cd packages/web
-npm install
-npm run dev
+cd packages/web && npm install && npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000)
 
-### 5. Submit a test query
-
+### 5. Submit a query
 ```bash
 curl -X POST http://localhost:8000/api/queries/ \
   -H "Content-Type: application/json" \
-  -d '{
-    "problem": "Explain zero-knowledge proofs in two paragraphs",
-    "capabilities": ["nlp", "reasoning"],
-    "bounty": "0",
-    "deadline_minutes": 5
-  }'
+  -d '{"problem": "What are the risks of a drone delivery startup?", "capabilities": ["reasoning"], "bounty": "0", "deadline_minutes": 5}'
+```
+
+### 6. Submit a proposal (with bounty)
+```bash
+curl -X POST http://localhost:8000/api/proposals/ \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Build a drone delivery startup", "description": "...", "max_roles": 4, "bounty": "4000000000000000000"}'
 ```
 
 ---
 
-## Deploy to Monad Testnet
+## Multi-node (WiFi / LAN)
 
 ```bash
-# 1. Generate wallets
-python scripts/generate_wallets.py
+# Node 1 (orchestrator + agents)
+python scripts/dev_all.py --network --endpoint http://192.168.1.10:8000
 
-# 2. Fund wallets at the Monad testnet faucet
+# Node 2 (agents only, joins via bootstrap)
+python scripts/dev_all.py --agents-only --bootstrap http://192.168.1.10:8000
+```
 
-# 3. Update .env — set MONAD_RPC_URL, DEPLOYER_PRIVATE_KEY, AGENT_*_PRIVATE_KEY
+---
 
-# 4. Deploy contracts
-make deploy-testnet
+## Contracts — Build & Test
 
-# 5. Copy contract addresses from deploy output into .env
-#    AGENT_REGISTRY_ADDRESS, QUERY_ESCROW_ADDRESS, etc.
+```bash
+cd packages/contracts
+forge build
+forge test -vv   # 48 tests
+```
+
+Deploy to Monad Devnet:
+```bash
+# Per-contract (avoids Yul stack depth errors)
+source .env
+cast send ... --rpc-url $MONAD_RPC_URL --private-key $DEPLOYER_PRIVATE_KEY
 ```
 
 ---
 
 ## Agent Tiers
 
-| Tier | Model | Peer review | Purpose |
+| Agent | Model | Specialty | Peer Review |
 |---|---|---|---|
-| **Alpha** | Claude Sonnet 4 | Claude Haiku (LLM-scored) | Best quality, builds on prior context |
-| **Beta** | GPT-4o-mini | — | Cost-effective generalist (needs OpenAI credits) |
-| **Gamma** | Groq llama-3.3-70b | Heuristic (length + structure) | Fast, high-volume agent |
+| Alpha | Claude Sonnet 3.5 | NLP, reasoning, coding | Claude Haiku |
+| Beta | GPT-4o-mini | Research, synthesis | OpenAI scoring |
+| Gamma | Groq llama-3.3-70b | Fast inference, structured output | Heuristic |
 
 ---
 
-## API Reference
+## Vision (Architecture B — Production)
 
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/api/queries/` | Create query, start orchestration |
-| `GET` | `/api/queries/` | List queries (filter by status/capability) |
-| `GET` | `/api/queries/{id}` | Query detail with all responses |
-| `POST` | `/api/queries/{id}/respond` | Agent submits response |
-| `POST` | `/api/queries/{id}/peer-review` | Agent submits peer scores |
-| `POST` | `/api/queries/{id}/sub-query` | Agent requests sub-agent help |
-| `GET` | `/api/agents/` | List registered agents |
-| `POST` | `/api/agents/register` | Register new agent |
-| `GET` | `/api/memory/{id}` | Get full task memory for a query |
-
-WebSocket: `ws://localhost:8000/ws/{query_id}` — live status + log streaming
+- **libp2p** for peer discovery and message routing (replace Redis)
+- **IPFS PubSub** for decentralized task broadcasting
+- **DHT** for agent capability lookup (replace AgentRegistry as central index)
+- **Orchestrator election** — reputation-weighted, on-chain bidding, failover
+- **Freelance track** — real deliverables, Arweave permanent storage, milestone-based escrow
+- **Slashing** — provable misbehavior slashes StakeVault deposit
+- **Dispute resolution** — challenge period, third-party arbitration pool
+- **DAO governance** — protocol parameters voted on-chain
 
 ---
 
-## Project Structure
+## Repo Structure
 
 ```
-monadBlitz/
-├── packages/
-│   ├── contracts/        # Solidity (Foundry) — 5 contracts, 48 tests
-│   ├── orchestrator/     # FastAPI + SQLAlchemy state machine (Python)
-│   │   └── src/orchestrator/
-│   │       ├── state_machine.py   # full query lifecycle
-│   │       ├── judge.py           # Meta-LLM judge (Claude Sonnet)
-│   │       ├── models.py          # Query, Response, PeerReview, SubQuery
-│   │       ├── memory_service.py  # shared task memory + hash
-│   │       ├── chain_client.py    # web3.py Monad integration
-│   │       └── routes/            # FastAPI routers
-│   ├── agents/           # AI agent nodes (Python)
-│   │   └── src/agents/
-│   │       ├── base.py    # Redis sub, sub-query, peer review
-│   │       ├── alpha.py   # Claude Sonnet + Haiku peer review
-│   │       ├── beta.py    # GPT-4o-mini
-│   │       └── gamma.py   # Groq llama + heuristic peer review
-│   ├── cli/              # Textual terminal dashboard (Python)
-│   └── web/              # Next.js 14 App Router frontend
-│       └── src/app/
-│           ├── explore/   # Live query feed — master-detail split panel
-│           ├── leaderboard/ # Sortable agent rankings
-│           └── dashboard/ # Wallet-gated query history
-├── scripts/
-│   ├── dev_all.py         # single-process dev runner
-│   ├── generate_wallets.py
-│   └── run_demo.py
-├── Makefile
-└── .env.example
+packages/
+  contracts/      — 6 Solidity contracts + 48 Foundry tests
+  orchestrator/   — FastAPI + state machines + chain client + vector store
+  agents/         — Alpha / Beta / Gamma agent nodes
+  web/            — Next.js 14 frontend
+scripts/
+  dev_all.py      — single-process dev runner
+  generate_wallets.py
+  register_agents.py
 ```
-
----
-
-## Key Technical Decisions
-
-- **Monad EVM + 10,000 TPS**: sub-second finality makes multi-round agent settlement practical; gas costs stay low for micro-bounties
-- **Shared task memory + hash**: full JSON event history (all rounds, peer scores, escalations) injected into round 2+ agent prompts; SHA256 anchored on-chain so the audit trail is tamper-proof
-- **SQLite + fakeredis in dev**: zero infrastructure to run locally; same code paths as production PostgreSQL + Redis
-- **70/30 blended scoring**: judge provides correctness signal, peer consensus penalizes agents that game confidence or produce hollow answers
-- **State machine recursion on escalation**: `_run_lifecycle()` calls itself after incrementing `query.round` — keeps the lifecycle linear and traceable
-- **Offline mode**: orchestrator runs without deployed contracts (tx calls are no-ops, logs a warning) — full agent coordination works without Monad connectivity
-- **`via_ir = true`**: required for Solidity IR codegen when copying `string[] calldata` to storage

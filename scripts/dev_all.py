@@ -21,6 +21,15 @@ import asyncio
 import os
 import sys
 
+# ── Load .env first so real contract addresses take precedence over defaults ──
+try:
+    from dotenv import load_dotenv
+    _env = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    if os.path.exists(_env):
+        load_dotenv(_env, override=False)
+except ImportError:
+    pass
+
 # ── Parse args first so env vars can reference them ─────────────────────────
 parser = argparse.ArgumentParser(description="MindMesh dev runner")
 parser.add_argument("--port", type=int, default=8000, help="Orchestrator HTTP port")
@@ -39,7 +48,10 @@ NODE_ENDPOINT = args.endpoint or (f"http://localhost:{PORT}" if not AGENTS_ONLY 
 BOOTSTRAP_NODES = args.bootstrap or os.environ.get("BOOTSTRAP_NODES", "")
 
 # ── 0. Env defaults ───────────────────────────────────────────────────────────
-os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///./dev_{PORT}.db"
+# DATABASE_URL is kept from .env (or set here for query track only).
+# The proposal track uses ChainEventStore (no SQLite) so we only set DATABASE_URL
+# if it hasn't been supplied by the loaded .env above.
+os.environ.setdefault("DATABASE_URL", f"sqlite+aiosqlite:///./dev_{PORT}.db")
 os.environ["REDIS_URL"] = "redis://localhost:6379"
 os.environ.setdefault("ORCHESTRATOR_HOST", "0.0.0.0")
 os.environ["ORCHESTRATOR_PORT"] = str(PORT)
@@ -109,7 +121,7 @@ else:
         redis.asyncio.from_url = _fake_from_url2
         print("[dev] Real Redis not available, using shared fakeredis")
 
-print(f"[dev] DATABASE_URL = sqlite+aiosqlite:///./dev_{PORT}.db")
+print(f"[dev] DATABASE_URL = {os.environ.get('DATABASE_URL')} (query track only; proposal track uses ChainEventStore)")
 
 # ── 2. Paths ──────────────────────────────────────────────────────────────────
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

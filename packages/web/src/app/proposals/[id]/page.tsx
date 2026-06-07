@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, use } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   api,
@@ -18,6 +18,9 @@ const BASE =
   process.env.NEXT_PUBLIC_API_URL ||
   process.env.NEXT_PUBLIC_ORCHESTRATOR_URL ||
   "http://localhost:8000";
+
+const EXPLORER = process.env.NEXT_PUBLIC_EXPLORER_URL || "https://testnet.monadexplorer.com";
+const PROPOSAL_ESCROW = process.env.NEXT_PUBLIC_PROPOSAL_ESCROW_ADDRESS || "0xDF6E43a9081c0E6D466aD8E82caF00881F6b7Bad";
 
 const ROUND_LABEL: Record<string, string> = {
   initial: "Initial perspectives",
@@ -476,9 +479,155 @@ function FinalReport({ proposal }: { proposal: Proposal }) {
   );
 }
 
+// ── Chain info panel ─────────────────────────────────────────────────────────
+function CopyBtn({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={() => {
+        navigator.clipboard.writeText(text).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        });
+      }}
+      title="Copy"
+      style={{
+        background: "none",
+        border: "none",
+        cursor: "pointer",
+        fontSize: "10px",
+        color: copied ? "var(--green)" : "var(--text-3)",
+        padding: "0 2px",
+        lineHeight: 1,
+      }}
+    >
+      {copied ? "✓" : "⎘"}
+    </button>
+  );
+}
+
+function ChainInfo({ proposal }: { proposal: Proposal }) {
+  const isActive = !["SETTLED", "FAILED"].includes(proposal.status);
+  const statusColor = proposal.status === "SETTLED"
+    ? "#22c55e"
+    : proposal.status === "FAILED"
+    ? "#ef4444"
+    : "#f59e0b";
+
+  return (
+    <div
+      style={{
+        border: "1px solid var(--border)",
+        borderRadius: "var(--radius)",
+        marginBottom: 16,
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          padding: "8px 14px",
+          background: "var(--bg-subtle)",
+          borderBottom: "1px solid var(--border)",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+        }}
+      >
+        <span style={{ fontSize: "11px", fontWeight: 600 }}>On-Chain</span>
+        <span style={{ fontSize: "10px", color: "var(--text-3)" }}>Monad Devnet · Chain 143</span>
+        <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 5 }}>
+          {isActive && (
+            <span
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: statusColor,
+                display: "inline-block",
+                animation: "pulse 1.4s infinite",
+              }}
+            />
+          )}
+          <span style={{ fontSize: "10px", color: statusColor, fontWeight: 600 }}>
+            {proposal.status.replace(/_/g, " ")}
+          </span>
+        </span>
+      </div>
+
+      <div style={{ padding: "10px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
+        {/* Proposal UUID */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: "10px", color: "var(--text-3)", width: 120, flexShrink: 0 }}>Proposal ID</span>
+          <code style={{ fontSize: "10px", color: "var(--text-1)", fontFamily: "monospace" }}>
+            {proposal.id}
+          </code>
+          <CopyBtn text={proposal.id} />
+        </div>
+
+        {/* On-chain escrow ID */}
+        {proposal.chain_proposal_id != null && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: "10px", color: "var(--text-3)", width: 120, flexShrink: 0 }}>Escrow ID</span>
+            <code style={{ fontSize: "10px", color: "var(--text-1)", fontFamily: "monospace" }}>
+              #{proposal.chain_proposal_id}
+            </code>
+            <CopyBtn text={String(proposal.chain_proposal_id)} />
+          </div>
+        )}
+
+        {/* ProposalEscrow contract */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: "10px", color: "var(--text-3)", width: 120, flexShrink: 0 }}>Contract</span>
+          <a
+            href={`${EXPLORER}/address/${PROPOSAL_ESCROW}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ fontSize: "10px", color: "var(--text-2)", fontFamily: "monospace", textDecoration: "none" }}
+          >
+            {PROPOSAL_ESCROW.slice(0, 10)}…{PROPOSAL_ESCROW.slice(-8)}
+          </a>
+          <CopyBtn text={PROPOSAL_ESCROW} />
+          <a
+            href={`${EXPLORER}/address/${PROPOSAL_ESCROW}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ fontSize: "9px", color: "var(--text-3)", textDecoration: "none", marginLeft: 4 }}
+          >
+            ↗ explorer
+          </a>
+        </div>
+
+        {/* Settlement tx hash — hide if null or all-zero placeholder */}
+        {proposal.tx_hash && !/^0x0+$/.test(proposal.tx_hash) && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: "10px", color: "var(--text-3)", width: 120, flexShrink: 0 }}>Settlement Tx</span>
+            <a
+              href={`${EXPLORER}/tx/${proposal.tx_hash}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ fontSize: "10px", color: "var(--green)", fontFamily: "monospace", textDecoration: "none" }}
+            >
+              {proposal.tx_hash.slice(0, 10)}…{proposal.tx_hash.slice(-8)}
+            </a>
+            <CopyBtn text={proposal.tx_hash} />
+            <a
+              href={`${EXPLORER}/tx/${proposal.tx_hash}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ fontSize: "9px", color: "var(--text-3)", textDecoration: "none", marginLeft: 4 }}
+            >
+              ↗ explorer
+            </a>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Main page ────────────────────────────────────────────────────────────────
-export default function ProposalDetailPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = use(params);
+export default function ProposalDetailPage({ params }: { params: { id: string } }) {
+  const { id } = params;
   const [proposal, setProposal] = useState<Proposal | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -619,6 +768,9 @@ export default function ProposalDetailPage({ params }: { params: Promise<{ id: s
           </div>
         )}
       </div>
+
+      {/* Chain info */}
+      <ChainInfo proposal={proposal} />
 
       {/* Final report (top for settled) */}
       {proposal.status === "SETTLED" && <FinalReport proposal={proposal} />}

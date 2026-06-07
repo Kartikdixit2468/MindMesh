@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .chain_client import ChainClient
+from .chain_store import init_chain_store
 from .config import settings
 from .database import create_tables
 from .judge import MetaLLMJudge
@@ -101,7 +102,24 @@ async def lifespan(app: FastAPI):
         ws_manager=_ws_manager,
     )
 
-    # Proposal state machine (new track)
+    # Proposal state machine (new track) — ChainEventStore replaces SQLite
+    try:
+        from eth_account import Account
+        from web3 import AsyncWeb3, AsyncHTTPProvider
+        _w3 = AsyncWeb3(AsyncHTTPProvider(settings.MONAD_RPC_URL))
+        _acct = Account.from_key(settings.DEPLOYER_PRIVATE_KEY)
+        init_chain_store(
+            w3=_w3 if settings.proposal_contracts_deployed else None,
+            account=_acct if settings.proposal_contracts_deployed else None,
+            contract_address=settings.PROPOSAL_ESCROW_ADDRESS,
+        )
+        logger.info(
+            f"✓ ChainEventStore: {'online (Monad)' if settings.proposal_contracts_deployed else 'offline (in-memory)'}"
+        )
+    except Exception as _e:
+        logger.warning(f"ChainEventStore init warning: {_e} — falling back to offline mode")
+        init_chain_store()
+
     _proposal_orchestrator = ProposalStateMachine(
         redis_client=_redis,
         ws_manager=_ws_manager,

@@ -80,6 +80,12 @@ contract ProposalEscrow is Ownable, ReentrancyGuard {
 
     event ProposalFailed(uint256 indexed proposalId, string reason);
 
+    // Events for off-chain data anchored on-chain via calldata
+    event RolesAnnounced(uint256 indexed proposalId, string[] names, string[] descriptions);
+    event BidPosted(uint256 indexed proposalId, string roleName, address indexed agent, uint256 fitScore100, string reasoning);
+    event MessagePosted(uint256 indexed proposalId, uint256 indexed roundNum, address indexed agent, string role, string content, string roundType);
+    event StatusUpdated(uint256 indexed proposalId, string newStatus);
+
     modifier onlyOrchestrator() {
         require(
             msg.sender == orchestratorAddress || msg.sender == owner(),
@@ -257,5 +263,40 @@ contract ProposalEscrow is Ownable, ReentrancyGuard {
 
     function getProposal(uint256 proposalId) external view returns (Proposal memory) {
         return proposals[proposalId];
+    }
+
+    // ── Calldata-only event emitters (no storage writes = cheap) ─────────────────
+
+    function announceRoles(
+        uint256 proposalId,
+        string[] calldata names,
+        string[] calldata descriptions
+    ) external onlyOrchestrator {
+        emit RolesAnnounced(proposalId, names, descriptions);
+    }
+
+    function postBid(
+        uint256 proposalId,
+        string calldata roleName,
+        address agent,
+        uint256 fitScore100,
+        string calldata reasoning
+    ) external onlyOrchestrator {
+        emit BidPosted(proposalId, roleName, agent, fitScore100, reasoning);
+    }
+
+    function postMessage(
+        uint256 proposalId,
+        uint256 roundNum,
+        address agent,
+        string calldata role,
+        string calldata content,
+        string calldata roundType
+    ) external onlyOrchestrator {
+        emit MessagePosted(proposalId, roundNum, agent, role, content, roundType);
+    }
+
+    function updateStatus(uint256 proposalId, string calldata newStatus) external onlyOrchestrator {
+        emit StatusUpdated(proposalId, newStatus);
     }
 }
