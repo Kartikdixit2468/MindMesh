@@ -572,8 +572,36 @@ textarea.input { resize: vertical; min-height: 96px; line-height: 1.55; }
 .dash-page { max-width: 900px; margin: 0 auto; padding: 32px 20px; }
 
 /* ─── RainbowKit override ─────────────────────────────────────────────── */
-[data-rk] button[data-testid="rk-connect-button"],
 [data-rk] button {
   font-family: var(--sans) !important;
   font-size: 12px !important;
+}
+
+/* Connect button: match black/white theme */
+[data-rk] button[data-testid="rk-connect-button"] {
+  background: var(--text-1) !important;
+  color: var(--bg) !important;
+  box-shadow: none !important;
+  border-radius: var(--radius) !important;
+  height: 30px !important;
+  padding: 0 12px !important;
+  font-weight: 500 !important;
+}
+[data-rk] button[data-testid="rk-connect-button"]:hover {
+  background: #333 !important;
+}
+
+/* Account button (after connected) */
+[data-rk] button[data-testid="rk-account-button"] {
+  background: var(--bg-muted) !important;
+  color: var(--text-1) !important;
+  box-shadow: none !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius) !important;
+  height: 30px !important;
+}
+
+/* Modal */
+[data-rk] [data-rk-modal] {
+  font-family: var(--sans) !important;
 }
