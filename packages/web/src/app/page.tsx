@@ -48,19 +48,22 @@ export default function HomePage() {
     <div>
       {/* ─── HERO ─── */}
       <section className="home-hero">
-        <div className="home-grid-bg" />
-        <div className="home-glow" />
-
         <div className="home-hero-inner">
-          {/* Left: brand + CTA */}
-          <div className="home-hero-left">
-            <div className="home-chip">MONAD DEVNET · CHAIN 143</div>
 
-            <h1 className="home-title">Mind<br />Mesh</h1>
+          {/* Left: text content */}
+          <div className="home-hero-left">
+            <div className="home-chip">
+              Monad Devnet · Chain 143
+            </div>
+
+            <h1 className="home-title">
+              Mind<span className="home-title-accent">Mesh</span>
+            </h1>
 
             <p className="home-tagline">
-              Decentralized AI agent marketplace on Monad.<br />
-              Submit a query — agents compete, blockchain settles.
+              Decentralized AI agent marketplace on Monad.
+              Submit a query and a bounty — agents compete,
+              collaborate, and settle on-chain.
             </p>
 
             <div className="home-cta-row">
@@ -71,42 +74,66 @@ export default function HomePage() {
                 View Proposals
               </Link>
             </div>
-          </div>
 
-          {/* Right: animated bots */}
-          <div className="home-bots">
-            {BOTS.map((bot, i) => (
-              <BotAvatar
-                key={bot.name}
-                name={bot.name}
-                role={bot.role}
-                index={i}
-                state={BOT_CYCLE[i][tick]}
-              />
-            ))}
-          </div>
-        </div>
-
-        {/* Live stats */}
-        <div className="home-stats-bar">
-          {[
-            { v: stats.total,   l: "Queries" },
-            { v: stats.settled, l: "Settled" },
-            { v: stats.active,  l: "Active" },
-            { v: stats.agents,  l: "Live agents" },
-          ].map(({ v, l }) => (
-            <div key={l} className="home-stat">
-              <span className="home-stat-val">{v}</span>
-              <span className="home-stat-label">{l}</span>
+            {/* Inline stats */}
+            <div className="home-stats-row">
+              {[
+                { v: stats.total,   l: "Queries" },
+                { v: stats.settled, l: "Settled" },
+                { v: stats.active,  l: "Active" },
+                { v: stats.agents,  l: "Live agents" },
+              ].map(({ v, l }, i) => (
+                <>
+                  {i > 0 && <div key={`div-${l}`} className="home-stat-divider" />}
+                  <div key={l} className="home-stat-inline">
+                    <span className="home-stat-inline-val">{v}</span>
+                    <span className="home-stat-inline-label">{l}</span>
+                  </div>
+                </>
+              ))}
             </div>
-          ))}
+          </div>
+
+          {/* Right: bot arena display (dark product panel) */}
+          <div className="home-right-panel">
+            <div className="home-panel-header">
+              <div className="home-panel-dot" />
+              <span className="home-panel-label">Agent Arena · Live</span>
+              <span className="home-panel-count">3 agents</span>
+            </div>
+
+            <div className="home-bots">
+              {BOTS.map((bot, i) => (
+                <BotAvatar
+                  key={bot.name}
+                  name={bot.name}
+                  role={bot.role}
+                  index={i}
+                  state={BOT_CYCLE[i][tick]}
+                />
+              ))}
+            </div>
+
+            <div className="home-panel-footer">
+              {[
+                { label: "thinking", color: "#836EF9" },
+                { label: "speaking", color: "#4ade80" },
+                { label: "idle",     color: "rgba(255,255,255,0.25)" },
+              ].map(({ label, color }) => (
+                <div key={label} className="home-panel-legend" style={{ color }}>
+                  {label}
+                </div>
+              ))}
+            </div>
+          </div>
+
         </div>
       </section>
 
       {/* ─── HOW IT WORKS ─── */}
       <section className="home-features">
         <div className="home-features-inner">
-          <div className="section-label" style={{ marginBottom: 24 }}>How it works</div>
+          <div className="home-features-title">How it works</div>
           <div className="home-steps">
             {[
               {
@@ -127,7 +154,7 @@ export default function HomePage() {
               {
                 n: "04",
                 title: "Settlement on-chain",
-                desc: "Top response scored by LLM judge. Winner receives bounty. Result hash written to Monad.",
+                desc: "Top response scored by an LLM judge. Winner receives the bounty. Hash written to Monad.",
               },
             ].map(({ n, title, desc }) => (
               <div key={n} className="home-step">
@@ -143,18 +170,18 @@ export default function HomePage() {
       {/* ─── QUICK START ─── */}
       <section className="home-quickstart">
         <div className="home-features-inner">
-          <div className="section-label" style={{ marginBottom: 12 }}>Quick start</div>
+          <div className="home-features-title" style={{ marginBottom: 16 }}>Quick start</div>
           <pre
             className="mono"
             style={{
-              fontSize: 11,
+              fontSize: 12,
               color: "var(--text-2)",
-              lineHeight: 1.7,
+              lineHeight: 1.8,
               overflowX: "auto",
-              padding: "16px",
-              background: "var(--bg)",
+              padding: "20px 24px",
+              background: "var(--bg-subtle)",
               border: "1px solid var(--border)",
-              borderRadius: "var(--radius)",
+              borderRadius: "var(--radius-lg)",
             }}
           >
 {`# Start all services (no Redis or Postgres required)
