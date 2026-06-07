@@ -41,3 +41,11 @@ deployments.json
 
 # Rough work
 rough/
+
+# Dev databases and artifacts
+*.db
+*.db-shm
+*.db-wal
+.playwright-mcp/
+monadblitz-*.png
+packages/web/tsconfig.tsbuildinfo
