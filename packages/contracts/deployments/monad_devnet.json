@@ -1,0 +1,22 @@
+{
+  "network": "monad_devnet",
+  "chainId": 143,
+  "rpc": "https://rpc.contract.dev/ea9849722e419fe19dc0b83b097f7a31",
+  "deployer": "0x0B388741F1f38551D0A5B16fe25c3A9D563983F8",
+  "contracts": {
+    "StakeVault": "0xB341b79696E5b115e4334A729a9Fbae256f7FA06",
+    "ReputationManager": "0x26086EE64B2061dB73D01087072AaECC8c016dE7",
+    "DecisionLedger": "0xFD36B5b0e710Ef0942E5B0F191A7419147D8698a",
+    "AgentRegistry": "0x41A6d28d32e3ce52bEDea4e58DB2a0eFc5b38D5D",
+    "QueryEscrow": "0x0e2353154D142319456b4220078BD2c41DeA1b3A",
+    "ProposalEscrow": "0xDF6E43a9081c0E6D466aD8E82caF00881F6b7Bad"
+  },
+  "wiring": {
+    "ReputationManager.escrowContract": "QueryEscrow",
+    "ReputationManager.authorizedCallers": ["ProposalEscrow"],
+    "DecisionLedger.escrowContract": "QueryEscrow",
+    "StakeVault.registryContract": "AgentRegistry",
+    "QueryEscrow.orchestratorAddress": "deployer",
+    "ProposalEscrow.orchestratorAddress": "deployer"
+  }
+}

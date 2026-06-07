@@ -7,57 +7,69 @@ import "../src/ReputationManager.sol";
 import "../src/DecisionLedger.sol";
 import "../src/AgentRegistry.sol";
 import "../src/QueryEscrow.sol";
+import "../src/ProposalEscrow.sol";
 
 contract DeployScript is Script {
     function run() external {
-        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
+        // Accept both PRIVATE_KEY and DEPLOYER_PRIVATE_KEY
+        uint256 deployerPrivateKey;
+        try vm.envUint("PRIVATE_KEY") returns (uint256 k) {
+            deployerPrivateKey = k;
+        } catch {
+            deployerPrivateKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
+        }
         address deployer = vm.addr(deployerPrivateKey);
 
         vm.startBroadcast(deployerPrivateKey);
 
-        // 1. Deploy StakeVault
+        // 1. StakeVault
         StakeVault stakeVault = new StakeVault();
-        console.log("StakeVault deployed at:", address(stakeVault));
+        console.log("StakeVault:", address(stakeVault));
 
-        // 2. Deploy ReputationManager
+        // 2. ReputationManager
         ReputationManager reputationManager = new ReputationManager();
-        console.log("ReputationManager deployed at:", address(reputationManager));
+        console.log("ReputationManager:", address(reputationManager));
 
-        // 3. Deploy DecisionLedger
+        // 3. DecisionLedger
         DecisionLedger decisionLedger = new DecisionLedger();
-        console.log("DecisionLedger deployed at:", address(decisionLedger));
+        console.log("DecisionLedger:", address(decisionLedger));
 
-        // 4. Deploy AgentRegistry (depends on StakeVault + ReputationManager)
+        // 4. AgentRegistry
         AgentRegistry agentRegistry = new AgentRegistry(
             address(stakeVault),
             address(reputationManager)
         );
-        console.log("AgentRegistry deployed at:", address(agentRegistry));
+        console.log("AgentRegistry:", address(agentRegistry));
 
-        // 5. Deploy QueryEscrow (depends on AgentRegistry + ReputationManager + DecisionLedger)
+        // 5. QueryEscrow
         QueryEscrow queryEscrow = new QueryEscrow(
             address(agentRegistry),
             address(reputationManager),
             address(decisionLedger)
         );
-        console.log("QueryEscrow deployed at:", address(queryEscrow));
+        console.log("QueryEscrow:", address(queryEscrow));
 
-        // 6. Wire up contracts
+        // 6. ProposalEscrow
+        ProposalEscrow proposalEscrow = new ProposalEscrow(
+            address(reputationManager)
+        );
+        console.log("ProposalEscrow:", address(proposalEscrow));
+
+        // 7. Wire up contracts
         reputationManager.setEscrowContract(address(queryEscrow));
-        console.log("ReputationManager: escrowContract set to QueryEscrow");
+        reputationManager.addAuthorizedCaller(address(proposalEscrow));
+        console.log("ReputationManager: wired to QueryEscrow + ProposalEscrow");
 
         decisionLedger.setEscrowContract(address(queryEscrow));
-        console.log("DecisionLedger: escrowContract set to QueryEscrow");
-
         stakeVault.setRegistryContract(address(agentRegistry));
-        console.log("StakeVault: registryContract set to AgentRegistry");
 
         queryEscrow.setOrchestratorAddress(deployer);
-        console.log("QueryEscrow: orchestratorAddress set to deployer:", deployer);
+        proposalEscrow.setOrchestrator(deployer);
+        console.log("Orchestrator address set to deployer:", deployer);
 
         vm.stopBroadcast();
 
-        // Output deployment summary as JSON
+        // Save deployment summary
         string memory json = string(abi.encodePacked(
             "{\n",
             '  "network": "monad_testnet",\n',
@@ -68,16 +80,15 @@ contract DeployScript is Script {
             '    "ReputationManager": "', vm.toString(address(reputationManager)), '",\n',
             '    "DecisionLedger": "', vm.toString(address(decisionLedger)), '",\n',
             '    "AgentRegistry": "', vm.toString(address(agentRegistry)), '",\n',
-            '    "QueryEscrow": "', vm.toString(address(queryEscrow)), '"\n',
+            '    "QueryEscrow": "', vm.toString(address(queryEscrow)), '",\n',
+            '    "ProposalEscrow": "', vm.toString(address(proposalEscrow)), '"\n',
             '  }\n',
             "}"
         ));
 
         console.log("\n=== Deployment Summary ===");
         console.log(json);
-
-        // Write to file
         vm.writeFile("deployments/monad_testnet.json", json);
-        console.log("\nDeployment addresses saved to deployments/monad_testnet.json");
+        console.log("Saved to deployments/monad_testnet.json");
     }
 }
