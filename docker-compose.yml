@@ -1,0 +1,104 @@
+version: "3.9"
+
+services:
+  # ── Infrastructure ─────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: monadblitz
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Orchestrator ───────────────────────────────────────────────────────────
+
+  orchestrator:
+    build:
+      context: ./packages/orchestrator
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:password@postgres:5432/monadblitz
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  # ── Agent Nodes ────────────────────────────────────────────────────────────
+
+  agent-alpha:
+    build:
+      context: ./packages/agents
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379
+      ORCHESTRATOR_BASE_URL: http://orchestrator:8000
+    command: ["python", "-m", "agents.alpha_runner"]
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+
+  agent-beta:
+    build:
+      context: ./packages/agents
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379
+      ORCHESTRATOR_BASE_URL: http://orchestrator:8000
+    command: ["python", "-m", "agents.beta_runner"]
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+
+  agent-gamma:
+    build:
+      context: ./packages/agents
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379
+      ORCHESTRATOR_BASE_URL: http://orchestrator:8000
+    command: ["python", "-m", "agents.gamma_runner"]
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+
+volumes:
+  pgdata:
