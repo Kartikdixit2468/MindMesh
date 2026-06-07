@@ -44,13 +44,13 @@ function ReputationBar({ score, maxScore }: { score: number; maxScore: number })
   );
 }
 
-type SortKey = 'reputation_score' | 'win_rate' | 'total_responses';
+type SortKey = 'reputation' | 'win_rate' | 'wins';
 
 export default function LeaderboardPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [capFilter, setCapFilter] = useState('all');
-  const [sortKey, setSortKey] = useState<SortKey>('reputation_score');
+  const [sortKey, setSortKey] = useState<SortKey>('reputation');
   const [sortAsc, setSortAsc] = useState(false);
 
   useEffect(() => {
@@ -60,8 +60,8 @@ export default function LeaderboardPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  const maxRep = agents.reduce((m, a) => Math.max(m, a.reputation_score), 0);
-  const avgRep = agents.length ? Math.round(agents.reduce((s, a) => s + a.reputation_score, 0) / agents.length) : 0;
+  const maxRep = agents.reduce((m, a) => Math.max(m, a.reputation ?? 0), 0);
+  const avgRep = agents.length ? Math.round(agents.reduce((s, a) => s + (a.reputation ?? 0), 0) / agents.length) : 0;
 
   const filtered = agents
     .filter((a) => capFilter === 'all' || (a.capabilities ?? []).includes(capFilter))
@@ -101,7 +101,7 @@ export default function LeaderboardPage() {
         {[
           { icon: Shield, label: 'Total Agents', value: agents.length, color: '#6366f1' },
           { icon: TrendingUp, label: 'Avg Reputation', value: avgRep.toLocaleString(), color: '#06b6d4' },
-          { icon: Zap, label: 'Top Score', value: (agents[0]?.reputation_score ?? 0).toLocaleString(), color: '#eab308' },
+          { icon: Zap, label: 'Top Score', value: (agents[0]?.reputation ?? 0).toLocaleString(), color: '#eab308' },
         ].map(({ icon: Icon, label, value, color }) => (
           <div key={label} className="card p-5 flex items-center gap-4">
             <div
@@ -177,7 +177,7 @@ export default function LeaderboardPage() {
                   {fmtAddr(agent.address)}
                 </p>
                 <div className="text-2xl font-black font-mono mb-1" style={{ color: rc.color }}>
-                  {agent.reputation_score.toLocaleString()}
+                  {(agent.reputation ?? 0).toLocaleString()}
                 </div>
                 <div className="text-xs mb-4" style={{ color: '#475569' }}>Reputation Score</div>
                 <div className="flex justify-center gap-4 text-xs">
@@ -185,7 +185,7 @@ export default function LeaderboardPage() {
                     {((agent.win_rate ?? 0) * 100).toFixed(0)}% win
                   </span>
                   <span style={{ color: '#64748b' }}>
-                    {agent.total_responses ?? 0} resp
+                    {(agent.wins ?? 0) + (agent.losses ?? 0)} resp
                   </span>
                 </div>
               </div>
@@ -222,8 +222,8 @@ export default function LeaderboardPage() {
                     { label: '#', key: null },
                     { label: 'Agent', key: null },
                     { label: 'Tier', key: null },
-                    { label: 'Reputation', key: 'reputation_score' as SortKey },
-                    { label: 'Responses', key: 'total_responses' as SortKey },
+                    { label: 'Reputation', key: 'reputation' as SortKey },
+                    { label: 'Wins', key: 'wins' as SortKey },
                     { label: 'Win Rate', key: 'win_rate' as SortKey },
                     { label: 'Capabilities', key: null },
                   ].map(({ label, key }) => (
@@ -299,12 +299,12 @@ export default function LeaderboardPage() {
 
                       {/* Reputation bar */}
                       <td className="px-5 py-4 w-48">
-                        <ReputationBar score={agent.reputation_score} maxScore={maxRep} />
+                        <ReputationBar score={agent.reputation ?? 0} maxScore={maxRep} />
                       </td>
 
-                      {/* Responses */}
+                      {/* Wins */}
                       <td className="px-5 py-4 text-center font-mono text-sm" style={{ color: '#94a3b8' }}>
-                        {agent.total_responses ?? 0}
+                        {(agent.wins ?? 0) + (agent.losses ?? 0)}
                       </td>
 
                       {/* Win rate */}

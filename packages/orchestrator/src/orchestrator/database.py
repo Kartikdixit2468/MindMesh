@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import AsyncGenerator, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -34,12 +34,23 @@ logger = logging.getLogger("orchestrator.database")
 
 # ── Engine & Session factory ───────────────────────────────────────────────────
 
+_is_sqlite = settings.DATABASE_URL.startswith("sqlite")
+
+_engine_kwargs: dict = {}
+if _is_sqlite:
+    # SQLite: use StaticPool + WAL mode for concurrent async access
+    from sqlalchemy.pool import StaticPool
+    _engine_kwargs = {
+        "connect_args": {"check_same_thread": False, "timeout": 30},
+        "poolclass": StaticPool,
+    }
+else:
+    _engine_kwargs = {"pool_pre_ping": True, "pool_size": 10, "max_overflow": 20}
+
 engine: AsyncEngine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
+    **_engine_kwargs,
 )
 
 AsyncSessionLocal = async_sessionmaker(
@@ -69,6 +80,9 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 async def create_tables() -> None:
     """Create all tables if they do not exist. Called during app startup."""
     async with engine.begin() as conn:
+        if _is_sqlite:
+            await conn.execute(text("PRAGMA journal_mode=WAL"))
+            await conn.execute(text("PRAGMA synchronous=NORMAL"))
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Database tables ensured.")
 

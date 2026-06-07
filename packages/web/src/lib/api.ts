@@ -19,12 +19,14 @@ export interface Agent {
   address: string;
   name: string;
   tier: string;
-  reputation_score: number;
+  reputation: number;
   capabilities: string[];
-  is_active: boolean;
-  total_responses: number;
+  active: boolean;
+  wins: number;
+  losses: number;
   win_rate: number;
-  total_earned?: number;
+  stake?: string;
+  metadata_uri?: string;
 }
 
 export interface TaskMemory {

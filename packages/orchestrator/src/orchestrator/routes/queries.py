@@ -101,8 +101,8 @@ async def create_query(
     db.add(query)
     await db.flush()
     await db.refresh(query)
-
     query_id = query.id
+    await db.commit()  # commit so background tasks can see the query
 
     # Initialize shared memory
     mem_svc = get_memory_service()
